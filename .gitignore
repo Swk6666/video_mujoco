@@ -1,0 +1,6 @@
+# Ignore rendered videos
+*.mp4
+
+# Ignore Python cache artifacts
+__pycache__/
+*.pyc
