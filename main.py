@@ -19,8 +19,8 @@ def main() -> None:
     with runner as sim:
         while sim.should_continue():
             # Add any additional per-step logic here
-            mujoco.mj_step(sim.model, sim.data)
-            sim.post_step()
+            #指定控制：sim.data.ctrl=np.array([0, 0, 0, 0, 0, 0, 0, 0])
+            sim.step() #mujoco.mj_step(sim.model, sim.data)和保存帧
 
     if runner.recorder_enabled:
         print(f"Saved MuJoCo video to {runner.output_path}")
