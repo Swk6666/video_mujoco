@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import platform
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import mujoco
 import numpy as np
@@ -194,3 +195,139 @@ class MujocoVideoRecorder:
             self.close()
         except Exception:
             pass
+
+
+class MujocoSimulationRunner:
+    """Runs a MuJoCo simulation with optional visualization and video capture."""
+
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        *,
+        duration: float = 10.0,
+        enable_visualization: bool = True,
+        enable_video_recording: bool = True,
+        recorder_kwargs: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if duration <= 0:
+            raise ValueError("duration must be positive")
+
+        self.model = model
+        self.data = data
+        self.duration = duration
+        self.enable_visualization = enable_visualization
+        self.enable_video_recording = enable_video_recording
+        self.recorder_kwargs = dict(recorder_kwargs or {})
+
+        self._stack: Optional[ExitStack] = None
+        self.recorder: Optional[MujocoVideoRecorder] = None
+        self.viewer = None
+        self._entered = False
+        self._recorder_enabled = False
+        self._output_path: Optional[Path] = None
+
+    @classmethod
+    def from_xml(
+        cls,
+        xml_path: str | Path,
+        **kwargs: Any,
+    ) -> "MujocoSimulationRunner":
+        model = mujoco.MjModel.from_xml_path(str(xml_path))
+        data = mujoco.MjData(model)
+        return cls(model, data, **kwargs)
+
+    @classmethod
+    def run_from_xml(
+        cls,
+        xml_path: str | Path,
+        **kwargs: Any,
+    ) -> Optional[Path]:
+        runner = cls.from_xml(xml_path, **kwargs)
+        return runner.run()
+
+    def __enter__(self) -> "MujocoSimulationRunner":
+        if self._entered:
+            raise RuntimeError("Simulation runner context already entered")
+
+        self._stack = ExitStack()
+        self.recorder = self._stack.enter_context(
+            MujocoVideoRecorder(
+                self.model,
+                self.data,
+                enabled=self.enable_video_recording,
+                **self.recorder_kwargs,
+            )
+        )
+        self._recorder_enabled = self.recorder.enabled
+        self._output_path = self.recorder.output_path
+
+        self.viewer = None
+        if self.enable_visualization:
+            self.viewer = self._stack.enter_context(
+                mujoco.viewer.launch_passive(self.model, self.data)
+            )
+
+        if self.recorder.enabled:
+            self.recorder.capture_frame(force=True)
+
+        self._entered = True
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if self._stack is not None:
+            self._stack.__exit__(exc_type, exc, traceback)
+
+        self._stack = None
+        self.recorder = None
+        self.viewer = None
+        self._entered = False
+
+    def step(self) -> None:
+        if not self._entered:
+            raise RuntimeError("Simulation runner context has not been entered")
+        mujoco.mj_step(self.model, self.data)
+        self.post_step()
+
+    def post_step(self) -> None:
+        if not self._entered:
+            raise RuntimeError("Simulation runner context has not been entered")
+
+        if self.recorder and self.recorder.enabled:
+            self.recorder.capture_frame()
+
+        if self.viewer is not None:
+            self.viewer.sync()
+
+    def capture_frame(self, force: bool = False) -> bool:
+        if not self._entered:
+            raise RuntimeError("Simulation runner context has not been entered")
+        if not self.recorder:
+            return False
+        if not self.recorder.enabled:
+            return False
+        return self.recorder.capture_frame(force=force)
+
+    def should_continue(self) -> bool:
+        if not self._entered:
+            raise RuntimeError("Simulation runner context has not been entered")
+
+        viewer_running = True
+        if self.viewer is not None:
+            viewer_running = self.viewer.is_running()
+
+        return self.data.time < self.duration and viewer_running
+
+    def run(self) -> Optional[Path]:
+        with self as session:
+            while session.should_continue():
+                session.step()
+        return self.output_path if self._recorder_enabled else None
+
+    @property
+    def recorder_enabled(self) -> bool:
+        return self._recorder_enabled
+
+    @property
+    def output_path(self) -> Optional[Path]:
+        return self._output_path
