@@ -24,6 +24,7 @@ class MujocoVideoRecorder:
         filename: str = "simulation.mp4",
         camera_name: str = "fixed_camera",
         encoder: Optional[str] = None,
+        enabled: bool = True,
     ) -> None:
         if fps <= 0:
             raise ValueError("fps must be positive")
@@ -31,6 +32,7 @@ class MujocoVideoRecorder:
         self.model = model
         self.data = data
         self.fps = fps
+        self.enabled = enabled
 
         try:
             width, height = resolution
@@ -42,10 +44,22 @@ class MujocoVideoRecorder:
         if self.width <= 0 or self.height <= 0:
             raise ValueError("resolution dimensions must be positive")
         self.output_dir = Path(output_dir).expanduser().resolve()
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.output_path = self.output_dir / filename
         self.camera_name = camera_name
         self.encoder = encoder or self._default_encoder()
+
+        self._frame_interval = 1.0 / fps
+        self._last_frame_time = -np.inf
+        self._ffmpeg: Optional[subprocess.Popen] = None
+        self._active = False
+
+        if not self.enabled:
+            self._renderer = None
+            self._scene_option = None
+            self._camera_id = -1
+            return
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self._renderer = mujoco.Renderer(model, self.height, self.width)
         self._scene_option = mujoco.MjvOption()
@@ -55,12 +69,10 @@ class MujocoVideoRecorder:
         if self._camera_id < 0:
             print(f"[MujocoVideoRecorder] Camera '{camera_name}' not found. Using free camera.")
 
-        self._frame_interval = 1.0 / fps
-        self._last_frame_time = -np.inf
-        self._ffmpeg: Optional[subprocess.Popen] = None
-        self._active = False
-
     def start(self) -> None:
+        if not self.enabled:
+            return
+
         if self._active:
             return
         command = self._build_ffmpeg_command()
@@ -72,6 +84,9 @@ class MujocoVideoRecorder:
             raise RuntimeError("Failed to launch FFmpeg. Ensure ffmpeg is installed and in PATH.") from exc
 
     def capture_frame(self, force: bool = False) -> bool:
+        if not self.enabled:
+            return False
+
         if not self._active or self._ffmpeg is None or self._ffmpeg.stdin is None:
             raise RuntimeError("Recorder has not been started. Call start() before capture_frame().")
 
@@ -95,6 +110,9 @@ class MujocoVideoRecorder:
         return True
 
     def close(self) -> None:
+        if not self.enabled:
+            return
+
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
